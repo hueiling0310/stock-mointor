@@ -125,7 +125,8 @@ def send_telegram_message(text: str):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     }
     try:
         res = requests.post(url, json=payload, timeout=5)
@@ -134,7 +135,6 @@ def send_telegram_message(text: str):
     except Exception as e:
         st.error(f"Telegram 連線失敗: {e}")
 
-# 新增：接收 Telegram 訊息，檢查是否有 push 指令
 def check_telegram_push_command():
     if not TELEGRAM_BOT_TOKEN:
         return False
@@ -150,7 +150,6 @@ def check_telegram_push_command():
         if res.status_code == 200:
             data = res.json()
             if data.get("ok") and data.get("result"):
-                # 👉 把抓到的訊息數量印在左邊欄，讓我們知道它到底有沒有在工作！
                 st.sidebar.info(f"👀 偷看到 {len(data['result'])} 則新訊息") 
                 
                 triggered = False
@@ -159,7 +158,6 @@ def check_telegram_push_command():
                     st.session_state.tg_last_update_id = update_id 
                     
                     message_text = item.get("message", {}).get("text", "").strip().lower()
-                    # 👉 把抓到的字印出來
                     st.sidebar.write(f"💬 內容: {message_text}") 
                     
                     if message_text == "push":
@@ -787,17 +785,33 @@ if st.session_state.tg_push_enabled:
         st.toast("🚀 收到 'push' 指令，強制觸發推播！")
         send_telegram_message("🤖 <b>收到指令，開始為您掃描並強制推播強勢股...</b>")
     elif st.session_state.scheduled_push_enabled:
-        current_minutes = tw_now.hour * 60 + tw_now.minute
-        TARGET_MINUTES = [9*60+40, 10*60, 11*60, 12*60, 13*60]
-        passed_targets = [t for t in TARGET_MINUTES if current_minutes >= t]
-        if passed_targets:
-            latest_target = passed_targets[-1]
-            today_str = tw_now.strftime("%Y%m%d")
-            current_schedule_key = f"slot_{today_str}_{latest_target}"
-            if current_schedule_key not in st.session_state.processed_time_slots:
-                can_push_now = True
+        # 定義每天的目標發送時間
+        TARGET_TIMES = [
+            tw_now.replace(hour=9, minute=40, second=0, microsecond=0),
+            tw_now.replace(hour=10, minute=0, second=0, microsecond=0),
+            tw_now.replace(hour=11, minute=0, second=0, microsecond=0),
+            tw_now.replace(hour=12, minute=0, second=0, microsecond=0),
+            tw_now.replace(hour=13, minute=0, second=0, microsecond=0)
+        ]
+
+        for target_dt in TARGET_TIMES:
+            # 計算當下時間與目標時間的差距（秒）
+            diff_seconds = (tw_now - target_dt).total_seconds()
+            
+            # 若時間差距在正負 50 秒以內
+            if abs(diff_seconds) <= 50:
+                # 產生唯一的排程 Key，例如 slot_20260609_0940
+                time_str = target_dt.strftime("%H%M")
+                today_str = tw_now.strftime("%Y%m%d")
+                current_schedule_key = f"slot_{today_str}_{time_str}"
+                
+                # 檢查該時段今天是否已經觸發過
+                if current_schedule_key not in st.session_state.processed_time_slots:
+                    can_push_now = True
+                    break  # 條件符合就跳出迴圈
     else:
-        can_push_now = True
+        # 修正：關閉排程時不應預設推播，否則 Streamlit 重刷就會一直送訊息
+        can_push_now = False
 
 group_tables = {}
 group_up_summary = []
@@ -819,17 +833,20 @@ for group_name, stocks in st.session_state.stock_groups.items():
             data = compute_indicators(df, price)
 
             # ===== 執行推播檢查 =====
-            is_high_gain = data["pct"] >= 1
+            is_high_gain = data["pct"] >= 5
             has_kd_signal = data["kd_signal"] in ["黃金交叉", "即將黃金交叉"]
             has_gap_signal = data["gap_signal"] == "跳空"
             
-            if is_high_gain and (has_kd_signal or has_gap_signal):
+            if is_high_gain or (has_kd_signal or has_gap_signal):
+                base_symbol = symbol.split('.')[0]
+                yahoo_url = f"https://tw.stock.yahoo.com/quote/{base_symbol}"
+                symbol_link = f'<a href="{yahoo_url}">{symbol}</a>'
                 today_str = tw_now.strftime("%Y-%m-%d")
                 notify_key = f"{symbol}_{today_str}"
                 
                 if can_push_now and (notify_key not in st.session_state.notified_stocks):
                     msg = (
-                        f"🔔 <b>強勢股達標通知：{stock_name} ({symbol})</b>\n\n"
+                        f"🔔 <b>強勢股達標通知：{stock_name} ({symbol_link})</b>\n\n"
                         f"📈 價格：{data['price']}\n"
                         f"🔥 漲幅：+{data['pct']}%\n"
                         f"📊 KD訊號：{data['kd_signal']}\n"
